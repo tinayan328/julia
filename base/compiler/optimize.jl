@@ -6,7 +6,7 @@
 
 mutable struct OptimizationState
     linfo::MethodInstance
-    vararg_type_container #::Type
+    result_vargs::Vector{Any}
     backedges::Vector{Any}
     src::CodeInfo
     mod::Module
@@ -23,7 +23,7 @@ mutable struct OptimizationState
         end
         src = frame.src
         next_label = max(label_counter(src.code), length(src.code)) + 10
-        return new(frame.linfo, frame.vararg_type_container,
+        return new(frame.linfo, frame.result.vargs,
                    s_edges::Vector{Any},
                    src, frame.mod, frame.nargs,
                    next_label, frame.min_valid, frame.max_valid,
@@ -53,8 +53,8 @@ mutable struct OptimizationState
             nargs = 0
         end
         next_label = max(label_counter(src.code), length(src.code)) + 10
-        vararg_type_container = nothing # if you want something more accurate, set it yourself :P
-        return new(linfo, vararg_type_container,
+        result_vargs = Any[] # if you want something more accurate, set it yourself :P
+        return new(linfo, result_vargs,
                    s_edges::Vector{Any},
                    src, inmodule, nargs,
                    next_label,
@@ -98,11 +98,6 @@ function add_backedge!(li::MethodInstance, caller::OptimizationState)
     push!(caller.backedges, li)
     update_valid_age!(li, caller)
     nothing
-end
-
-function is_specializable_vararg_slot(@nospecialize(arg), sv::OptimizationState)
-    return (isa(arg, Slot) && slot_id(arg) == sv.nargs &&
-            isa(sv.vararg_type_container, DataType))
 end
 
 ###########
@@ -1299,35 +1294,21 @@ function inlineable(@nospecialize(f), @nospecialize(ft), e::Expr, atypes::Vector
         end
     end
 
-    argexprs0 = argexprs
-    atypes0 = atypes
     na = Int(method.nargs)
-    # check for vararg function
-    isva = false
-    if na > 0 && method.isva
-        @assert length(argexprs) >= na - 1
-        # construct tuple-forming expression for argument tail
-        vararg = mk_tuplecall(argexprs[na:end], sv)
-        argexprs = Any[argexprs[1:(na - 1)]..., vararg]
-        atypes = Any[atypes[1:(na - 1)]..., vararg.typ]
-        isva = true
-    elseif na != length(argexprs)
+    if method.isva ? length(argexprs) < na : na != length(argexprs)
         # we have a method match only because an earlier
         # inference step shortened our call args list, even
         # though we have too many arguments to actually
         # call this function
         return NOT_FOUND
     end
-
-    @assert na == length(argexprs)
-
     for i = 1:length(methsp)
         isa(methsp[i], TypeVar) && return NOT_FOUND
     end
 
     # see if the method has been previously inferred (and cached)
     linfo = code_for_method(method, metharg, methsp, sv.params.world, true) # Union{Nothing, MethodInstance}
-    isa(linfo, MethodInstance) || return invoke_NF(argexprs0, e.typ, atypes0, sv,
+    isa(linfo, MethodInstance) || return invoke_NF(argexprs, e.typ, atypes, sv,
                                                    atype_unlimited, invoke_data)
     linfo = linfo::MethodInstance
     if invoke_api(linfo) == 2
@@ -1384,7 +1365,7 @@ function inlineable(@nospecialize(f), @nospecialize(ft), e::Expr, atypes::Vector
         src_inlineable = ccall(:jl_ast_flag_inlineable, Bool, (Any,), inferred)
     end
     if !src_inferred || !src_inlineable
-        return invoke_NF(argexprs0, e.typ, atypes0, sv, atype_unlimited,
+        return invoke_NF(argexprs, e.typ, atypes, sv, atype_unlimited,
                          invoke_data)
     end
 
@@ -1404,18 +1385,27 @@ function inlineable(@nospecialize(f), @nospecialize(ft), e::Expr, atypes::Vector
     body = Expr(:block)
     body.args = ast
 
-    # see if each argument occurs only once in the body expression
     stmts = []
     prelude_stmts = []
     stmts_free = true # true = all entries of stmts are effect_free
 
-    argexprs = copy(argexprs)
-    if isva
+    # check for vararg function
+    if na > 0 && method.isva
+        @assert length(argexprs) >= na - 1
+        # construct tuple-forming expression for argument tail
+        vararg = mk_tuplecall(argexprs[na:end], sv)
+        argexprs = Any[argexprs[1:(na - 1)]..., vararg]
+        atypes = Any[atypes[1:(na - 1)]..., vararg.typ]
         # move constructed vararg tuple to an ssavalue
         varargvar = newvar!(sv, atypes[na])
         push!(prelude_stmts, Expr(:(=), varargvar, argexprs[na]))
         argexprs[na] = varargvar
+    else
+        argexprs = copy(argexprs)
     end
+    @assert na == length(argexprs)
+
+    # see if each argument occurs only once in the body expression
     for i = na:-1:1 # stmts_free needs to be calculated in reverse-argument order
         #args_i = args[i]
         aei = argexprs[i]
@@ -2003,8 +1993,8 @@ function inline_call(e::Expr, sv::OptimizationState, stmts::Vector{Any}, boundsc
                         tmpv = newvar!(sv, t)
                         push!(newstmts, Expr(:(=), tmpv, aarg))
                     end
-                    if is_specializable_vararg_slot(aarg, sv)
-                        tp = sv.vararg_type_container.parameters
+                    if is_specializable_vararg_slot(aarg, sv.nargs, sv.result_vargs)
+                        tp = sv.result_vargs
                     else
                         tp = t.parameters
                     end
