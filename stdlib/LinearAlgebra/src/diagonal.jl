@@ -481,6 +481,10 @@ end
 # dismabiguation methods: * of Diagonal and Adj/Trans AbsVec
 *(A::Diagonal, B::Adjoint{<:Any,<:AbstractVector}) = A * copy(B)
 *(A::Diagonal, B::Transpose{<:Any,<:AbstractVector}) = A * copy(B)
-*(A::Adjoint{<:Any,<:AbstractVector}, B::Diagonal) = copy(A) * B
-*(A::Transpose{<:Any,<:AbstractVector}, B::Diagonal) = copy(A) * B
+*(x::Adjoint{<:Any,<:AbstractVector}, D::Diagonal) = Adjoint(map((t,s) -> t'*s, D.diag, parent(x)))
+*(x::Adjoint{<:Any,<:AbstractVector}, D::Diagonal, y::AbstractVector) =
+    mapreduce(t -> t[1]'*t[2]*t[3], +, zip(parent(x), D.diag, y))
+*(A::Transpose{<:Any,<:AbstractVector}, B::Diagonal) = Transpose(map(*, D.diag, parent(x)))
+*(x::Adjoint{<:Any,<:AbstractVector}, D::Diagonal, y::AbstractVector) =
+    mapreduce(t -> t[1]*t[2]*t[3], +, zip(parent(x), D.diag, y))
 # TODO: these methods will yield row matrices, rather than adjoint/transpose vectors
